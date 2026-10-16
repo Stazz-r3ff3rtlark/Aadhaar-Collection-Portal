@@ -1,0 +1,28 @@
+{
+  "name": "aadhaar-portal-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aadhaar Collection Portal API (Node.js, Express, MariaDB)",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "build": "node --check src/server.js && echo 'Backend has no build step'",
+    "migrate": "node src/db/migrate.js",
+    "create-admin": "node src/cli/create-admin.js",
+    "test": "node --test --test-concurrency=1 test/"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "express": "^5.3.0",
+    "helmet": "^8.3.0",
+    "mariadb": "^3.5.4",
+    "nodemailer": "^10.1.1"
+  },
+  "devDependencies": {
+    "supertest": "^7.3.1"
+  }
+}
