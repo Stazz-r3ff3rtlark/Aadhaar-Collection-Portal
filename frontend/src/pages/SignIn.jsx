@@ -26,16 +26,9 @@ export default function SignIn({ onSignedIn }) {
     }
   }
 
-  function checkDomain() {
-    if (!email.trim().toLowerCase().endsWith(DOMAIN)) {
-      setError(`Use your ${DOMAIN} email address.`);
-      return false;
-    }
-    return true;
-  }
-
+  // Every email gets the same neutral answer and moves on to the code screen, so the
+  // screen never reveals whether an account exists (or is deactivated).
   const sendCode = (purpose) => run(async () => {
-    if (!checkDomain()) return;
     const path = purpose === 'reset' ? '/auth/password/reset/request' : '/auth/otp/request';
     const res = await api(path, { method: 'POST', body: { email } });
     setNotice(res.message);
@@ -52,10 +45,10 @@ export default function SignIn({ onSignedIn }) {
     <main className="center">
       <div className="card narrow">
         <h1>Sign in</h1>
-        <p className="muted">Aadhaar Collection Portal for Alembic sales coordinators, hospitality and admins.</p>
+        <p className="muted">Aadhaar Collection Portal. Sign in with your {DOMAIN} email.</p>
 
         {step === 'email' && (
-          <form onSubmit={(e) => { e.preventDefault(); if (checkDomain()) setStep('choose'); }}>
+          <form onSubmit={(e) => { e.preventDefault(); setError(''); setStep('choose'); }}>
             <EmailField email={email} setEmail={setEmail} autoFocus />
             <button type="submit" disabled={busy}>Continue</button>
           </form>

@@ -12,6 +12,11 @@ describe('date formatting', () => {
     expect(formatDateTime('2026-10-14T16:48:00.000+05:30')).toBe('14/10/2026 16:48 IST');
   });
 
+  it('shows calendar dates (check-in, check-out) without shifting the day', () => {
+    expect(formatDate('2026-10-30')).toBe('30/10/2026');
+    expect(formatDate('2027-01-01')).toBe('01/01/2027');
+  });
+
   it('returns an empty string for missing or invalid values', () => {
     expect(formatDate(null)).toBe('');
     expect(formatDate('not a date')).toBe('');

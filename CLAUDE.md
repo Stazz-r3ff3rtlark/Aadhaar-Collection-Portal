@@ -45,11 +45,14 @@ Standard npm scripts, run in each package (frontend and backend):
 - Register every API endpoint with `defineRoute()` in `backend/src/http/route.js`. It enforces sign-in, the role permission (`backend/src/auth/policy.js`) and writes the audit entry in the same transaction. Set `ctx.audit.entityType/entityId/bookingId/details` in the handler.
 - Time: use `backend/src/lib/time.js` (`toIstSql`, `toIstIso`, `formatIstDate`). DB `DATETIME(3)` columns hold IST wall-clock time.
 - Logging: `backend/src/lib/logger.js` only; it redacts via `backend/src/lib/sanitize.js`.
-- Store: repositories live in `backend/src/db/mariadb-store.js`, mirrored by `memory-store.js` for tests. Add a method to both.
-- Schema changes: new numbered file in `backend/migrations/`; never edit an applied one.
+- Store: repositories live in `backend/src/db/mariadb-store.js`. Tests run against the real MariaDB test database `aadhaar_portal_test` (see README), not an in-memory copy.
+- Schema changes: new numbered file in `backend/migrations/`; never edit an applied one. MariaDB applies DDL statement by statement, so write migrations to be safe to re-run (`IF EXISTS` / `IF NOT EXISTS`). Local MariaDB is 10.4, so keep SQL compatible with 10.4.
+- Booking access goes through `loadBooking()` in `backend/src/bookings/routes.js` (division scoping; other divisions get "not found", audited as denied). Status changes go through the table in `backend/src/bookings/status.js`.
+- Employee rows: `backend/src/bookings/employee-rows.js` is the single set of rules for import, add and replace. Anything that invites, reminds or counts travellers must use `employees.listActive()` so vacant and cancelled rows are excluded.
 
 ## Domain notes (from the PRD)
 
+- Divisions are a flat, admin-managed list of free names (for example Megacare, Maxis, Business Excellence, Digilabs) with no parent or grouping. Never hard-code, seed or branch on a division name or id in code, migrations or UI; tests may use any names as fixtures. The PRD's "Marketing, Business Enablers" are examples only. Every user belongs to exactly one division; only coordinators are limited by it.
 - Roles: sales, sales coordinators, hospitality (admin-like for bookings), admins, and vendor hotels (passcode link, expires at check-out).
 - Sign-in: `@alembic.co.in` email added by an admin; email OTP or saved password. Employees confirm a booking with an emailed OTP to their predefined email.
 - One shared booking link; the employee picks their name from the uploaded list.

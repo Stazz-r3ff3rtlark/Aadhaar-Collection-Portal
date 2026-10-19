@@ -80,6 +80,14 @@ describe('audit service', () => {
     });
   });
 
+  it('is append-only in the database itself: UPDATE and DELETE are refused', async () => {
+    await t.store.transaction((tx) => t.audit.record(tx, { action: 'test.write', actorType: 'system', outcome: 'success' }));
+    await assert.rejects(t.query("UPDATE audit_log SET action = 'test.changed'"), /append-only/);
+    await assert.rejects(t.query('DELETE FROM audit_log'), /append-only/);
+    const [entry] = await t.auditEntries('test.write');
+    assert.ok(entry, 'the entry is still there');
+  });
+
   describe('defineRoute', () => {
     let app;
     const NEW_EMAIL = 'rolled.back@alembic.co.in';
@@ -92,7 +100,7 @@ describe('audit service', () => {
       app.use(sessionMiddleware(app.locals.deps));
       const router = express.Router();
       defineRoute(router, 'post', '/explode', { auth: 'public', audit: 'test.explode' }, async (ctx) => {
-        await ctx.tx.users.insert({ email: NEW_EMAIL, name: 'X', role: 'hospitality', createdAt: '2026-10-14 10:00:00.000', updatedAt: '2026-10-14 10:00:00.000' });
+        await ctx.tx.users.insert({ email: NEW_EMAIL, name: 'X', role: 'hospitality', divisionId: 3, createdAt: '2026-10-14 10:00:00.000', updatedAt: '2026-10-14 10:00:00.000' });
         ctx.audit.entityType = 'user';
         throw new Error('boom after write');
       });
@@ -100,7 +108,7 @@ describe('audit service', () => {
         throw new HttpError(422, 'nope', 'Nope.');
       });
       defineRoute(router, 'post', '/write', { auth: 'public', audit: 'test.write' }, async (ctx) => {
-        await ctx.tx.users.insert({ email: NEW_EMAIL, name: 'X', role: 'hospitality', createdAt: '2026-10-14 10:00:00.000', updatedAt: '2026-10-14 10:00:00.000' });
+        await ctx.tx.users.insert({ email: NEW_EMAIL, name: 'X', role: 'hospitality', divisionId: 3, createdAt: '2026-10-14 10:00:00.000', updatedAt: '2026-10-14 10:00:00.000' });
         return { status: 201 };
       });
       defineRoute(router, 'get', '/ok', { auth: 'public', audit: 'test.ok' }, async (ctx) => {
@@ -128,7 +136,7 @@ describe('audit service', () => {
     it('rolls back the action when it fails, and still records the failure', async () => {
       const res = await request(app).post('/explode').send({});
       assert.equal(res.status, 500);
-      const emails = (await t.store.dump('users')).map((u) => u.email);
+      const emails = (await t.dump('users')).map((u) => u.email);
       assert.ok(!emails.includes(NEW_EMAIL), 'the write was rolled back');
       const [entry] = await t.auditEntries('test.explode');
       assert.equal(entry.outcome, 'failure');
@@ -147,7 +155,7 @@ describe('audit service', () => {
       app.locals.deps.audit = failingAudit;
       const res = await request(app).post('/write').send({});
       assert.equal(res.status, 500);
-      const emails = (await t.store.dump('users')).map((u) => u.email);
+      const emails = (await t.dump('users')).map((u) => u.email);
       assert.ok(!emails.includes(NEW_EMAIL), 'no action commits without its audit entry');
     });
   });

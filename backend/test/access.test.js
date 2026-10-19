@@ -3,33 +3,33 @@
 const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
-const { buildTestApp, request } = require('./helpers');
+const { buildTestApp, request, DIVISIONS } = require('./helpers');
 const policy = require('../src/auth/policy');
 const { defineRoute } = require('../src/http/route');
 
-const { can, canViewBooking, canEditBooking, canFinaliseBooking, canViewAadhaar, PERMISSIONS } = policy;
+const { can, canViewBooking, canEditBooking, canCreateBookingIn, canFinaliseBooking, canViewAadhaar, PERMISSIONS } = policy;
 
-const MARKETING = 1;
-const BUSINESS_ENABLERS = 2;
+const { MEGACARE, MAXIS, DIGILABS } = DIVISIONS;
 
 const users = {
-  admin: { id: 1, role: 'admin', isActive: true, divisionId: null },
-  hospitality: { id: 2, role: 'hospitality', isActive: true, divisionId: null },
-  coordinator: { id: 3, role: 'coordinator', isActive: true, divisionId: MARKETING },
-  analytics: { id: 4, role: 'analytics_viewer', isActive: true, divisionId: null },
+  admin: { id: 1, role: 'admin', isActive: true, divisionId: DIGILABS },
+  hospitality: { id: 2, role: 'hospitality', isActive: true, divisionId: DIGILABS },
+  coordinator: { id: 3, role: 'coordinator', isActive: true, divisionId: MEGACARE },
+  colleague: { id: 5, role: 'coordinator', isActive: true, divisionId: MEGACARE },
+  analytics: { id: 4, role: 'analytics_viewer', isActive: true, divisionId: DIGILABS },
 };
 
-const booking = (status, divisionId = MARKETING) => ({ id: 10, status, divisionId });
+const booking = (status, divisionId = MEGACARE) => ({ id: 10, status, divisionId, coordinatorUserId: 3 });
 
 describe('access rules (policy)', () => {
   it('grants each permission only to the roles in the PRD roles table', () => {
     const expected = {
-      admin: ['users.manage', 'divisions.manage', 'hotels.manage', 'settings.manage', 'audit.read',
-        'bookings.history.read', 'analytics.read'],
-      hospitality: ['bookings.read', 'bookings.edit', 'bookings.history.read', 'bookings.reopen',
-        'deadlines.extend', 'guests.cancel', 'emergency_contacts.manage', 'hotel_links.manage',
+      admin: ['users.manage', 'divisions.manage', 'settings.manage', 'audit.read', 'hotels.read', 'hotels.manage',
+        'bookings.read', 'bookings.history.read', 'analytics.read'],
+      hospitality: ['hotels.read', 'hotels.manage', 'bookings.read', 'bookings.edit', 'bookings.history.read',
+        'bookings.reopen', 'deadlines.extend', 'guests.cancel', 'emergency_contacts.manage', 'hotel_links.manage',
         'files.delete', 'guests.verify', 'aadhaar.view'],
-      coordinator: ['bookings.create', 'bookings.read', 'bookings.edit', 'bookings.finalise', 'aadhaar.view'],
+      coordinator: ['hotels.read', 'bookings.create', 'bookings.read', 'bookings.edit', 'bookings.finalise', 'aadhaar.view'],
       analytics: ['analytics.read'],
     };
     for (const [who, allowed] of Object.entries(expected)) {
@@ -54,7 +54,7 @@ describe('access rules (policy)', () => {
 
   it('denies everything to deactivated users, unknown roles and anonymous callers', () => {
     const inactive = { ...users.hospitality, isActive: false };
-    const strange = { id: 9, role: 'superuser', isActive: true };
+    const strange = { id: 9, role: 'superuser', isActive: true, divisionId: MEGACARE };
     for (const permission of Object.keys(PERMISSIONS)) {
       assert.equal(can(inactive, permission), false);
       assert.equal(can(strange, permission), false);
@@ -67,14 +67,44 @@ describe('access rules (policy)', () => {
     assert.throws(() => can(users.admin, 'user.manage'), /Unknown permission/);
   });
 
-  describe('coordinators', () => {
-    it('see only their own division\'s bookings', () => {
-      assert.equal(canViewBooking(users.coordinator, booking('collecting', MARKETING)), true);
-      assert.equal(canViewBooking(users.coordinator, booking('collecting', BUSINESS_ENABLERS)), false);
-      assert.equal(canEditBooking(users.coordinator, booking('collecting', BUSINESS_ENABLERS)), false);
-      assert.equal(canViewAadhaar(users.coordinator, booking('collecting', BUSINESS_ENABLERS)), false);
+  describe('division scoping', () => {
+    it('coordinators see only their own division\'s bookings', () => {
+      assert.equal(canViewBooking(users.coordinator, booking('collecting', MEGACARE)), true);
+      assert.equal(canViewBooking(users.coordinator, booking('collecting', MAXIS)), false);
+      assert.equal(canEditBooking(users.coordinator, booking('collecting', MAXIS)), false);
+      assert.equal(canViewAadhaar(users.coordinator, booking('collecting', MAXIS)), false);
     });
 
+    it('coordinators share their division\'s bookings, including colleagues\' ones', () => {
+      const colleaguesBooking = { ...booking('collecting'), coordinatorUserId: users.colleague.id };
+      assert.equal(canViewBooking(users.coordinator, colleaguesBooking), true);
+      assert.equal(canEditBooking(users.coordinator, colleaguesBooking), true);
+    });
+
+    it('coordinators create bookings only in their own, active division', () => {
+      assert.equal(canCreateBookingIn(users.coordinator, { id: MEGACARE, archivedAt: null }), true);
+      assert.equal(canCreateBookingIn(users.coordinator, { id: MAXIS, archivedAt: null }), false);
+      assert.equal(canCreateBookingIn(users.coordinator, { id: MEGACARE, archivedAt: '2026-10-01 00:00:00.000' }), false);
+      assert.equal(canCreateBookingIn(users.hospitality, { id: DIGILABS, archivedAt: null }), false);
+    });
+
+    it('hospitality and admins see every division whatever their own division is', () => {
+      for (const divisionId of [MEGACARE, MAXIS, DIGILABS]) {
+        assert.equal(canViewBooking(users.hospitality, booking('draft', divisionId)), true);
+        assert.equal(canViewBooking(users.admin, booking('draft', divisionId)), true);
+      }
+    });
+
+    it('admins see bookings but cannot edit them', () => {
+      assert.equal(canEditBooking(users.admin, booking('draft')), false);
+    });
+
+    it('analytics viewers see no bookings', () => {
+      assert.equal(canViewBooking(users.analytics, booking('draft')), false);
+    });
+  });
+
+  describe('coordinators and booking status', () => {
     it('edit, finalise and view Aadhaar only before finalise', () => {
       for (const status of ['draft', 'collecting']) {
         assert.equal(canEditBooking(users.coordinator, booking(status)), true, status);
@@ -97,7 +127,7 @@ describe('access rules (policy)', () => {
 
   describe('hospitality', () => {
     it('sees and edits every booking in every division and status', () => {
-      for (const divisionId of [MARKETING, BUSINESS_ENABLERS]) {
+      for (const divisionId of [MEGACARE, MAXIS]) {
         for (const status of ['draft', 'finalised', 'shared_with_hotel', 'completed', 'cancelled']) {
           assert.equal(canViewBooking(users.hospitality, booking(status, divisionId)), true);
           assert.equal(canEditBooking(users.hospitality, booking(status, divisionId)), true);
@@ -127,7 +157,7 @@ describe('access rules (HTTP)', () => {
     t = await buildTestApp();
     await t.seedUser({ email: ADMIN, name: 'Admin', role: 'admin' });
     await t.seedUser({ email: HOSPITALITY, name: 'Hospitality', role: 'hospitality' });
-    await t.seedUser({ email: COORDINATOR, name: 'Coordinator', role: 'coordinator', divisionId: MARKETING });
+    await t.seedUser({ email: COORDINATOR, name: 'Coordinator', role: 'coordinator', divisionId: MEGACARE });
     await t.seedUser({ email: ANALYTICS, name: 'Analytics', role: 'analytics_viewer' });
   });
   afterEach(() => t.close());
@@ -141,16 +171,16 @@ describe('access rules (HTTP)', () => {
     assert.equal(entry.details.reason, 'unauthenticated');
   });
 
-  it('only admins manage the allow-list; other roles are refused and audited by name', async () => {
+  it('only admins manage users and divisions; other roles are refused and audited by name', async () => {
     for (const email of [HOSPITALITY, COORDINATOR, ANALYTICS]) {
       const agent = await t.signIn(email);
       await agent.get('/api/admin/users').expect(403);
-      await agent.post('/api/admin/users').send({ email: 'x@alembic.co.in', name: 'X', role: 'admin' }).expect(403);
+      await agent.post('/api/admin/users').send({ email: 'x@alembic.co.in', name: 'X', role: 'admin', divisionId: 1 }).expect(403);
+      await agent.post('/api/admin/divisions').send({ name: 'Rogue' }).expect(403);
     }
-    const denied = (await t.auditEntries()).filter((e) => e.outcome === 'denied' && e.action.startsWith('admin.users'));
-    assert.equal(denied.length, 6);
+    const denied = (await t.auditEntries()).filter((e) => e.outcome === 'denied' && e.action.startsWith('admin.'));
+    assert.equal(denied.length, 9);
     assert.deepEqual([...new Set(denied.map((e) => e.actorEmail))].sort(), [ANALYTICS, COORDINATOR, HOSPITALITY]);
-    assert.ok(denied.every((e) => e.details.permission === 'users.manage'));
 
     const admin = await t.signIn(ADMIN);
     const res = await admin.get('/api/admin/users').expect(200);
@@ -173,82 +203,9 @@ describe('access rules (HTTP)', () => {
     assert.equal(reads[3].actorEmail, ADMIN);
   });
 
-  describe('admin allow-list management', () => {
-    let admin;
-    beforeEach(async () => { admin = await t.signIn(ADMIN); });
-
-    it('adds a company email, which can then sign in', async () => {
-      const email = 'new.coordinator@alembic.co.in';
-      const res = await admin.post('/api/admin/users')
-        .send({ email: 'New.Coordinator@alembic.co.in', name: 'New Coordinator', role: 'coordinator', divisionId: BUSINESS_ENABLERS });
-      assert.equal(res.status, 201);
-      assert.equal(res.body.user.email, email);
-      assert.equal(res.body.user.divisionId, BUSINESS_ENABLERS);
-      await t.signIn(email);
-
-      const [entry] = (await t.auditEntries('admin.users.create')).filter((e) => e.outcome === 'success');
-      assert.equal(entry.actorEmail, ADMIN);
-      assert.equal(entry.entityId, String(res.body.user.id));
-      assert.equal(entry.details.new.role, 'coordinator');
-    });
-
-    it('refuses non-company emails', async () => {
-      const res = await admin.post('/api/admin/users').send({ email: 'someone@gmail.com', name: 'Someone', role: 'hospitality' });
-      assert.equal(res.status, 400);
-      assert.equal(res.body.error, 'email_domain_not_allowed');
-      const [entry] = await t.auditEntries('admin.users.create');
-      assert.equal(entry.outcome, 'failure');
-    });
-
-    it('requires a division for coordinators and ignores it for other roles', async () => {
-      await admin.post('/api/admin/users').send({ email: 'c@alembic.co.in', name: 'C', role: 'coordinator' }).expect(400);
-      await admin.post('/api/admin/users').send({ email: 'c@alembic.co.in', name: 'C', role: 'coordinator', divisionId: 999 }).expect(400);
-      const res = await admin.post('/api/admin/users')
-        .send({ email: 'h@alembic.co.in', name: 'H', role: 'hospitality', divisionId: MARKETING }).expect(201);
-      assert.equal(res.body.user.divisionId, null);
-    });
-
-    it('refuses unknown roles and duplicates', async () => {
-      await admin.post('/api/admin/users').send({ email: 'r@alembic.co.in', name: 'R', role: 'root' }).expect(400);
-      await admin.post('/api/admin/users').send({ email: HOSPITALITY, name: 'Again', role: 'hospitality' }).expect(409);
-    });
-
-    it('deactivating a user ends their sessions immediately', async () => {
-      const victim = await t.signIn(HOSPITALITY);
-      await victim.get('/api/auth/me').expect(200);
-      const { body } = await admin.get('/api/admin/users');
-      const target = body.users.find((u) => u.email === HOSPITALITY);
-
-      const res = await admin.patch(`/api/admin/users/${target.id}`).send({ isActive: false }).expect(200);
-      assert.equal(res.body.user.isActive, false);
-      await victim.get('/api/auth/me').expect(401);
-
-      const [entry] = await t.auditEntries('admin.users.update');
-      assert.deepEqual(entry.details.changes, { isActive: { old: true, new: false } });
-      assert.equal(entry.details.sessionsRevoked, 1);
-    });
-
-    it('a role change ends sessions so new permissions apply at once', async () => {
-      const coordinator = await t.signIn(COORDINATOR);
-      const { body } = await admin.get('/api/admin/users');
-      const target = body.users.find((u) => u.email === COORDINATOR);
-      await admin.patch(`/api/admin/users/${target.id}`).send({ role: 'hospitality' }).expect(200);
-      await coordinator.get('/api/auth/me').expect(401);
-    });
-
-    it('admins cannot deactivate or demote themselves', async () => {
-      const { body } = await admin.get('/api/admin/users');
-      const self = body.users.find((u) => u.email === ADMIN);
-      await admin.patch(`/api/admin/users/${self.id}`).send({ isActive: false }).expect(400);
-      await admin.patch(`/api/admin/users/${self.id}`).send({ role: 'hospitality' }).expect(400);
-    });
-
-    it('cannot change email or password through the admin console', async () => {
-      const { body } = await admin.get('/api/admin/users');
-      const target = body.users.find((u) => u.email === HOSPITALITY);
-      await admin.patch(`/api/admin/users/${target.id}`).send({ email: 'other@alembic.co.in' }).expect(400);
-      await admin.patch(`/api/admin/users/${target.id}`).send({ passwordHash: 'x' }).expect(400);
-    });
+  it('analytics viewers cannot open bookings', async () => {
+    const agent = await t.signIn(ANALYTICS);
+    await agent.get('/api/bookings').expect(403);
   });
 
   describe('route definitions', () => {

@@ -1,6 +1,7 @@
 'use strict';
 
-// Role-based access rules for internal users, from the PRD roles table.
+// Role-based access rules for internal users, from the PRD roles table and the
+// "User and division rules".
 //
 // Employees (sales staff travelling on a booking) and hotels never have accounts: they
 // use tokenised links, which are authorised separately in later stages.
@@ -8,7 +9,8 @@
 // Two layers:
 //   1. can(user, permission): what a role may do at all.
 //   2. Resource checks (canViewBooking, canViewAadhaar, ...): division scoping and
-//      booking-status rules for coordinators.
+//      booking-status rules. Every user has a division, but only coordinators are
+//      limited by it; hospitality, admins and analytics viewers see all divisions.
 // Everything not listed is denied.
 
 const ROLES = Object.freeze({
@@ -26,13 +28,17 @@ const PERMISSIONS = Object.freeze({
   // Admin console (master data). Admins never see Aadhaar files.
   'users.manage': [ADMIN],
   'divisions.manage': [ADMIN],
-  'hotels.manage': [ADMIN],
   'settings.manage': [ADMIN],
   'audit.read': [ADMIN],
 
+  // Hotels: everyone who works on bookings can pick from the list; admin and
+  // hospitality complete pending entries or merge duplicates.
+  'hotels.read': [ADMIN, HOSPITALITY, COORDINATOR],
+  'hotels.manage': [ADMIN, HOSPITALITY],
+
   // Bookings. Coordinators are further limited to their division (see below).
   'bookings.create': [COORDINATOR],
-  'bookings.read': [COORDINATOR, HOSPITALITY],
+  'bookings.read': [COORDINATOR, HOSPITALITY, ADMIN],
   'bookings.edit': [COORDINATOR, HOSPITALITY],
   'bookings.finalise': [COORDINATOR],
   'bookings.history.read': [ADMIN, HOSPITALITY],
@@ -53,7 +59,7 @@ const PERMISSIONS = Object.freeze({
   'analytics.read': [ADMIN, ANALYTICS_VIEWER],
 });
 
-/** Statuses in which a coordinator still owns and can edit the booking. */
+/** Statuses in which coordinators still own and can edit the booking. */
 const COORDINATOR_EDITABLE_STATUSES = new Set(['draft', 'collecting']);
 
 function isActiveUser(user) {
@@ -66,16 +72,26 @@ function can(user, permission) {
   return isActiveUser(user) && roles.includes(user.role);
 }
 
+/** All coordinators of a division share its bookings, including each other's. */
 function inOwnDivision(user, booking) {
   return user.role === COORDINATOR && user.divisionId != null && booking.divisionId === user.divisionId;
 }
 
 function canViewBooking(user, booking) {
   if (!can(user, 'bookings.read')) return false;
-  return user.role === HOSPITALITY || inOwnDivision(user, booking);
+  return user.role !== COORDINATOR || inOwnDivision(user, booking);
 }
 
-/** F2: after finalise the booking is read-only for the coordinator; hospitality can always edit. */
+/** Coordinators create bookings only in their own division, and not in an archived one. */
+function canCreateBookingIn(user, division) {
+  return can(user, 'bookings.create') && Boolean(division) && !division.archivedAt
+    && user.divisionId === division.id;
+}
+
+/**
+ * F2: after finalise the booking is read-only for coordinators; hospitality can always
+ * edit. Covers booking details and employees (add, remove, replace, vacant flip).
+ */
 function canEditBooking(user, booking) {
   if (!can(user, 'bookings.edit')) return false;
   if (user.role === HOSPITALITY) return true;
@@ -98,8 +114,10 @@ module.exports = {
   ROLES,
   ALL_ROLES,
   PERMISSIONS,
+  COORDINATOR_EDITABLE_STATUSES,
   can,
   canViewBooking,
+  canCreateBookingIn,
   canEditBooking,
   canFinaliseBooking,
   canViewAadhaar,

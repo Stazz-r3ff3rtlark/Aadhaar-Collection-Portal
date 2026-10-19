@@ -65,6 +65,59 @@ function addMinutes(date, minutes) {
   return new Date(date.getTime() + minutes * 60 * 1000);
 }
 
+// --- Calendar dates (DATE columns): 'YYYY-MM-DD', always an IST calendar day ---
+
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DISPLAY_DATE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
+
+function isRealDate(year, month, day) {
+  const d = new Date(Date.UTC(year, month - 1, day));
+  return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+}
+
+/**
+ * Parses a calendar date typed as DD/MM/YYYY (what people see) or YYYY-MM-DD.
+ * Returns 'YYYY-MM-DD', or null if it is not a real date.
+ */
+function parseCalendarDate(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  let year;
+  let month;
+  let day;
+  let m = DISPLAY_DATE.exec(text);
+  if (m) {
+    [day, month, year] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  } else if ((m = ISO_DATE.exec(text))) {
+    [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  } else {
+    return null;
+  }
+  if (!isRealDate(year, month, day)) return null;
+  return `${year}-${pad(month)}-${pad(day)}`;
+}
+
+/** Today's date in IST as 'YYYY-MM-DD'. */
+function istToday(now) {
+  return toIstSql(now).slice(0, 10);
+}
+
+/** 'YYYY-MM-DD' plus n days (n may be negative). */
+function addDays(isoDate, days) {
+  const [y, m, d] = isoDate.split('-').map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d + days));
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+}
+
+/** Whole days from a to b ('YYYY-MM-DD'); positive when b is later. */
+function daysBetween(a, b) {
+  const toUtc = (iso) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  return Math.round((toUtc(b) - toUtc(a)) / 86_400_000);
+}
+
 const systemClock = { now: () => new Date() };
 
 module.exports = {
@@ -76,5 +129,9 @@ module.exports = {
   formatIstDate,
   formatIstDateTime,
   addMinutes,
+  parseCalendarDate,
+  istToday,
+  addDays,
+  daysBetween,
   systemClock,
 };

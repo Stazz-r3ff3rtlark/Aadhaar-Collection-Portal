@@ -2,9 +2,11 @@
 
 // Bootstrap the first admin, who can then add everyone else from the admin console.
 //
-//   npm run create-admin -- --email someone@alembic.co.in --name "Full Name"
+//   npm run create-admin -- --email someone@alembic.co.in --name "Full Name" --division "Digilabs"
 //
-// The new admin signs in with an emailed code and can then set a password.
+// Every user belongs to one division. Divisions are free names; if none matches the one
+// given (ignoring case), it is created. The new admin signs in with an emailed code and
+// can then set a password.
 
 const os = require('node:os');
 const { loadEnvFile } = require('../lib/env');
@@ -24,8 +26,9 @@ function arg(name) {
 async function main() {
   const email = (arg('email') || '').trim().toLowerCase();
   const name = (arg('name') || '').trim();
-  if (!email.endsWith(`@${ALLOWED_EMAIL_DOMAIN}`) || !name) {
-    console.error(`Usage: npm run create-admin -- --email someone@${ALLOWED_EMAIL_DOMAIN} --name "Full Name"`);
+  const divisionName = (arg('division') || '').trim().replace(/\s+/g, ' ');
+  if (!email.endsWith(`@${ALLOWED_EMAIL_DOMAIN}`) || !name || !divisionName || divisionName.length > 100) {
+    console.error(`Usage: npm run create-admin -- --email someone@${ALLOWED_EMAIL_DOMAIN} --name "Full Name" --division "Division name"`);
     process.exit(2);
   }
 
@@ -36,19 +39,37 @@ async function main() {
     const id = await store.transaction(async (tx) => {
       if (await tx.users.findByEmail(email)) throw new Error(`${email} is already on the allow-list`);
       const now = toIstSql(systemClock.now());
-      const userId = await tx.users.insert({ email, name, role: 'admin', isActive: true, createdAt: now, updatedAt: now });
+      const actor = { actorType: 'system', actorLabel: `cli:create-admin (os user ${os.userInfo().username})` };
+
+      let division = await tx.divisions.findByName(divisionName);
+      if (division?.archivedAt) throw new Error(`The ${division.name} division is archived. Choose another, or restore it first.`);
+      if (!division) {
+        const divisionId = await tx.divisions.insert({ name: divisionName, createdAt: now, updatedAt: now });
+        await audit.record(tx, {
+          ...actor,
+          action: 'admin.divisions.create',
+          outcome: 'success',
+          entityType: 'division',
+          entityId: String(divisionId),
+          details: { new: { name: divisionName }, via: 'cli' },
+        });
+        division = { id: divisionId, name: divisionName };
+      }
+
+      const userId = await tx.users.insert({
+        email, name, role: 'admin', divisionId: division.id, isActive: true, createdAt: now, updatedAt: now,
+      });
       await audit.record(tx, {
-        actorType: 'system',
-        actorLabel: `cli:create-admin (os user ${os.userInfo().username})`,
+        ...actor,
         action: 'admin.users.create',
         outcome: 'success',
         entityType: 'user',
         entityId: String(userId),
-        details: { new: { email, name, role: 'admin' }, via: 'cli' },
+        details: { new: { email, name, role: 'admin', divisionId: division.id }, via: 'cli' },
       });
       return userId;
     });
-    console.log(`Admin created (user id ${id}). They can now sign in with an emailed code.`);
+    console.log(`Admin created (user id ${id}) in division "${divisionName}". They can now sign in with an emailed code.`);
   } finally {
     await store.close();
   }

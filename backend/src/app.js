@@ -6,7 +6,9 @@ const logger = require('./lib/logger');
 const { randomUUID } = require('./lib/crypto');
 const { sessionMiddleware } = require('./http/session');
 const { authRoutes } = require('./auth/routes');
-const { adminRoutes } = require('./admin/routes');
+const { adminRoutes, divisionRoutes } = require('./admin/routes');
+const { hotelRoutes } = require('./hotels/routes');
+const { bookingRoutes } = require('./bookings/routes');
 const { auditRoutes } = require('./audit/routes');
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -71,7 +73,8 @@ function createApp(deps) {
   app.use(requestLog);
 
   const api = express.Router();
-  api.use(express.json({ limit: '100kb' }));
+  // 1 MB fits a confirmed import of the largest employee list (2,000 rows).
+  api.use(express.json({ limit: '1mb' }));
   api.use(originGuard(deps));
   api.use(sessionMiddleware(deps));
 
@@ -89,6 +92,9 @@ function createApp(deps) {
 
   api.use('/auth', authRoutes());
   api.use('/admin', adminRoutes());
+  api.use('/divisions', divisionRoutes());
+  api.use('/hotels', hotelRoutes());
+  api.use('/bookings', bookingRoutes());
   api.use('/audit', auditRoutes());
 
   api.use((_req, res) => res.status(404).json({ error: 'not_found', message: 'Not found.' }));
@@ -99,8 +105,11 @@ function createApp(deps) {
   // Last-resort error handler. Never echoes the request or the error message.
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, _next) => {
-    if (err.type === 'entity.parse.failed' || err.type === 'entity.too.large') {
-      return res.status(err.status || 400).json({ error: 'invalid_body', message: 'The request body could not be read.' });
+    if (err.type === 'entity.too.large') {
+      return res.status(413).json({ error: 'too_large', message: 'The upload is too large.' });
+    }
+    if (err.type === 'entity.parse.failed') {
+      return res.status(400).json({ error: 'invalid_body', message: 'The request body could not be read.' });
     }
     logger.error('unhandled error', { requestId: req.requestId, ...logger.errorFields(err) });
     return res.status(500).json({ error: 'internal_error', message: 'Something went wrong. Please try again.' });

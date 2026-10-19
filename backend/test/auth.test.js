@@ -16,22 +16,30 @@ describe('internal sign-in', () => {
   afterEach(() => t.close());
 
   describe('allow-list', () => {
-    it('rejects emails outside @alembic.co.in without sending anything', async () => {
+    it('gives other domains the same neutral answer and sends nothing', async () => {
+      const known = await request(t.app).post('/api/auth/otp/request').send({ email: EMAIL });
       const res = await request(t.app).post('/api/auth/otp/request').send({ email: 'asha@gmail.com' });
-      assert.equal(res.status, 400);
-      assert.equal(res.body.error, 'email_domain_not_allowed');
-      assert.equal(t.mailer.outbox.length, 0);
-      const [entry] = await t.auditEntries('auth.otp.request');
+      assert.equal(res.status, 202);
+      assert.deepEqual(res.body, known.body);
+      assert.equal(res.body.message, 'If this email is registered, a code has been sent.');
+      assert.equal(t.mailCount('asha@gmail.com'), 0);
+      const entry = (await t.auditEntries('auth.otp.request')).find((e) => e.details.claimedEmail === 'asha@gmail.com');
       assert.equal(entry.outcome, 'failure');
-      assert.equal(entry.actorType, 'anonymous');
+      assert.equal(entry.details.reason, 'email_domain_not_allowed');
     });
 
-    it('rejects look-alike domains', async () => {
+    it('treats look-alike domains as other domains', async () => {
       for (const email of ['asha@alembic.co.in.evil.com', 'asha@notalembic.co.in', 'asha@alembic.co']) {
         const res = await request(t.app).post('/api/auth/otp/request').send({ email });
-        assert.equal(res.status, 400, email);
+        assert.equal(res.status, 202, email);
       }
       assert.equal(t.mailer.outbox.length, 0);
+    });
+
+    it('still rejects text that is not an email address', async () => {
+      const res = await request(t.app).post('/api/auth/otp/request').send({ email: 'not an email' });
+      assert.equal(res.status, 400);
+      assert.equal(res.body.error, 'invalid_email');
     });
 
     it('does not send a code to a company email that an admin has not added, and does not reveal that', async () => {
@@ -47,14 +55,17 @@ describe('internal sign-in', () => {
       assert.equal(strangerEntry.details.reason, 'not_on_allow_list');
     });
 
-    it('does not let a deactivated user sign in', async () => {
+    it('gives a deactivated user the same neutral answer and no code', async () => {
       const email = 'former@alembic.co.in';
       await t.seedUser({ email, isActive: false });
+      const known = await request(t.app).post('/api/auth/otp/request').send({ email: EMAIL });
       const res = await request(t.app).post('/api/auth/otp/request').send({ email });
       assert.equal(res.status, 202);
+      assert.deepEqual(res.body, known.body);
       assert.equal(t.mailCount(email), 0);
       const verify = await request(t.app).post('/api/auth/otp/verify').send({ email, code: '123456' });
       assert.equal(verify.status, 401);
+      assert.equal(verify.body.message, 'That code is not valid or has expired.');
     });
 
     it('treats email case and surrounding spaces as the same address', async () => {
@@ -120,6 +131,7 @@ describe('internal sign-in', () => {
       t.clock.advanceMinutes(11);
       const res = await request(t.app).post('/api/auth/otp/verify').send({ email: EMAIL, code });
       assert.equal(res.status, 401);
+      assert.equal(res.body.message, 'That code is not valid or has expired.');
     });
 
     it('accepts a code only once', async () => {
@@ -184,7 +196,7 @@ describe('internal sign-in', () => {
 
     it('stores only a bcrypt hash', async () => {
       await setPassword();
-      const [user] = await t.store.dump('users');
+      const [user] = await t.dump('users');
       assert.match(user.passwordHash, /^\$2[aby]\$\d{2}\$/);
       assert.ok(!user.passwordHash.includes(PASSWORD));
     });
@@ -319,7 +331,7 @@ describe('internal sign-in', () => {
       await request(t.app).post('/api/auth/password/reset/confirm').send({ email: EMAIL, code, newPassword: PASSWORD });
       await request(t.app).post('/api/auth/password/login').send({ email: EMAIL, password: PASSWORD });
       await request(t.app).post('/api/auth/password/login').send({ email: EMAIL, password: 'a wrong one!!' });
-      const [user] = await t.store.dump('users');
+      const [user] = await t.dump('users');
       const log = JSON.stringify(await t.auditEntries());
       for (const secret of [code, PASSWORD, 'a wrong one!!', user.passwordHash]) {
         assert.ok(!log.includes(secret), `audit log contains a secret: ${secret.slice(0, 4)}…`);

@@ -12,7 +12,8 @@ const { can } = require('../auth/policy');
 //     changes, so an action never commits without its audit record.
 // Denied and failed attempts are audited as well.
 //
-// Handlers receive a context and return { status?, body? }. They set ctx.audit fields
+// Handlers receive a context and return { status?, body? }, or { file } for a download.
+// They set ctx.audit fields
 // (entityType, entityId, bookingId, details, outcome, actor) to describe what happened.
 
 function createContext(req, deps, action) {
@@ -68,13 +69,15 @@ async function recordStandalone(ctx, outcome, extraDetails) {
   await store.transaction((tx) => audit.record(tx, auditEntry(ctx, outcome, extraDetails)));
 }
 
-function send(res, ctx, status, body) {
+function send(res, ctx, status, body, file) {
   for (const c of ctx.cookies) {
     if (c.clear) res.clearCookie(c.name, c.options);
     else res.cookie(c.name, c.value, c.options);
   }
   res.set('Cache-Control', 'no-store');
-  if (body === undefined) res.status(status).end();
+  if (file) {
+    res.status(status).type(file.contentType).attachment(file.filename).send(file.buffer);
+  } else if (body === undefined) res.status(status).end();
   else res.status(status).json(body);
 }
 
@@ -106,20 +109,31 @@ function defineRoute(router, method, path, options, handler) {
 
       const result = await deps.store.transaction(async (tx) => {
         ctx.tx = tx;
+        // A second audit entry in the same transaction, for side effects such as a
+        // pending hotel created while saving a booking.
+        ctx.recordAudit = (fields) => deps.audit.record(tx, {
+          ...auditEntry(ctx, 'success'),
+          entityType: null,
+          entityId: null,
+          bookingId: null,
+          details: {},
+          ...fields,
+        });
         const out = (await handler(ctx)) || {};
         const status = out.status ?? 200;
         const outcome = ctx.audit.outcome || (status >= 400 ? 'failure' : 'success');
         await deps.audit.record(tx, auditEntry(ctx, outcome));
-        return { status, body: out.body };
+        return { status, body: out.body, file: out.file };
       });
-      return send(res, ctx, result.status, result.body);
+      return send(res, ctx, result.status, result.body, result.file);
     } catch (err) {
       ctx.tx = null;
       ctx.cookies.length = 0;
       const known = err instanceof HttpError;
       const status = known ? err.status : 500;
       try {
-        await recordStandalone(ctx, status === 403 ? 'denied' : 'failure', { error: known ? err.code : 'internal_error' });
+        const outcome = err.auditOutcome || (status === 403 ? 'denied' : 'failure');
+        await recordStandalone(ctx, outcome, { error: known ? err.code : 'internal_error' });
       } catch (auditErr) {
         logger.error('audit write failed', { action, requestId: ctx.requestId, ...logger.errorFields(auditErr) });
       }

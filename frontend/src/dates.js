@@ -18,8 +18,12 @@ function parts(value) {
   return Object.fromEntries(dateParts.formatToParts(date).map((p) => [p.type, p.value]));
 }
 
-/** DD/MM/YYYY in IST, or an empty string. */
+/** DD/MM/YYYY in IST, or an empty string. Calendar dates ('YYYY-MM-DD') are shown as they are. */
 export function formatDate(value) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [y, m, d] = value.split('-');
+    return `${d}/${m}/${y}`;
+  }
   const p = value == null ? null : parts(value);
   return p ? `${p.day}/${p.month}/${p.year}` : '';
 }

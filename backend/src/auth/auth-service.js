@@ -17,8 +17,9 @@ const { startSession } = require('../http/session');
 //
 // All functions take the route context (ctx.tx is the open transaction).
 
-const GENERIC_CODE_SENT = { ok: true, message: 'If this email is registered, a code is on its way.' };
-const INVALID_CODE = { error: 'invalid_code', message: 'That code is incorrect or has expired. Request a new one.' };
+// One neutral answer for every email: registered, unknown, deactivated or another domain.
+const GENERIC_CODE_SENT = { ok: true, message: 'If this email is registered, a code has been sent.' };
+const INVALID_CODE = { error: 'invalid_code', message: 'That code is not valid or has expired.' };
 const INVALID_LOGIN = { error: 'invalid_credentials', message: 'Incorrect email or password.' };
 
 const EMAIL_PATTERN = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
@@ -30,11 +31,16 @@ function normaliseEmail(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
-/** Throws 400 unless the email is well-formed and on the company domain. */
-function requireCompanyEmail(ctx, email) {
+/** Throws 400 unless the email is well-formed. */
+function requireEmailFormat(email) {
   if (!EMAIL_PATTERN.test(email) || email.length > 254) {
     throw badRequest('invalid_email', 'Enter a valid email address.');
   }
+}
+
+/** Throws 400 unless the email is well-formed and on the company domain (admin console). */
+function requireCompanyEmail(ctx, email) {
+  requireEmailFormat(email);
   const domain = ctx.deps.config.allowedEmailDomain;
   if (!email.endsWith(`@${domain}`)) {
     throw badRequest('email_domain_not_allowed', `Use your @${domain} email address.`);
@@ -57,6 +63,12 @@ function otpHash(config, userId, purpose, code) {
 /** Looks up an allow-listed, active user. Records the reason on the audit entry if not found. */
 async function findAllowedUser(ctx, email) {
   ctx.audit.details.claimedEmail = email;
+  // Other domains get the same neutral answer as unknown emails; only the audit log knows.
+  if (!email.endsWith(`@${ctx.deps.config.allowedEmailDomain}`)) {
+    ctx.audit.outcome = 'failure';
+    ctx.audit.details.reason = 'email_domain_not_allowed';
+    return null;
+  }
   const user = await ctx.tx.users.findByEmail(email);
   if (!user) {
     ctx.audit.outcome = 'failure';
@@ -88,7 +100,7 @@ const OTP_EMAIL = {
 async function requestCode(ctx, rawEmail, purpose) {
   const { config, clock, mailer } = ctx.deps;
   const email = normaliseEmail(rawEmail);
-  requireCompanyEmail(ctx, email);
+  requireEmailFormat(email);
   ctx.audit.details.purpose = purpose;
 
   const user = await findAllowedUser(ctx, email);
@@ -177,7 +189,7 @@ async function completeSignIn(ctx, user, method) {
 
 async function signInWithCode(ctx, rawEmail, code) {
   const email = normaliseEmail(rawEmail);
-  requireCompanyEmail(ctx, email);
+  requireEmailFormat(email);
   const user = await findAllowedUser(ctx, email);
   if (!user || !(await consumeCode(ctx, user, 'login', code))) {
     return { status: 401, body: INVALID_CODE };
@@ -188,7 +200,7 @@ async function signInWithCode(ctx, rawEmail, code) {
 async function signInWithPassword(ctx, rawEmail, password) {
   const { config, clock } = ctx.deps;
   const email = normaliseEmail(rawEmail);
-  requireCompanyEmail(ctx, email);
+  requireEmailFormat(email);
   if (typeof password !== 'string' || !password) throw badRequest('password_required', 'Enter your password.');
 
   const user = await findAllowedUser(ctx, email);
@@ -239,7 +251,7 @@ async function signInWithPassword(ctx, rawEmail, password) {
 async function resetPassword(ctx, rawEmail, code, newPassword) {
   const { config, clock } = ctx.deps;
   const email = normaliseEmail(rawEmail);
-  requireCompanyEmail(ctx, email);
+  requireEmailFormat(email);
   validatePassword(config, newPassword);
 
   const user = await findAllowedUser(ctx, email);
@@ -269,6 +281,7 @@ function publicUser(user) {
     name: user.name,
     role: user.role,
     divisionId: user.divisionId ?? null,
+    divisionName: user.divisionName ?? null,
     isActive: Boolean(user.isActive),
     hasPassword: Boolean(user.passwordHash),
     lastLoginAt: toIstIso(user.lastLoginAt),
@@ -278,6 +291,7 @@ function publicUser(user) {
 
 module.exports = {
   normaliseEmail,
+  requireEmailFormat,
   requireCompanyEmail,
   validatePassword,
   requestCode,

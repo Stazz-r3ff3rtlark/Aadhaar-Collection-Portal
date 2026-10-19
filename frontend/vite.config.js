@@ -8,7 +8,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://127.0.0.1:17101',
+      // API_PROXY_TARGET lets a second copy run beside your usual one (e.g. for testing).
+      '/api': process.env.API_PROXY_TARGET || 'http://127.0.0.1:17101',
     },
   },
   build: {
