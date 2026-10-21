@@ -25,4 +25,4 @@ function computeDeadline(checkInDate, now) {
   };
 }
 
-module.exports = { computeDeadline, DEADLINE_DAYS };
+module.exports = { computeDeadline, DEADLINE_DAYS, END_OF_DAY };

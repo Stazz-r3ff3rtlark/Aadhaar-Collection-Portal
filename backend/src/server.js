@@ -12,6 +12,7 @@ const { createPool, createMariaDbStore } = require('./db/mariadb-store');
 const { createAuditService } = require('./audit/audit-service');
 const { createMailer } = require('./mail/mailer');
 const { createApp } = require('./app');
+const { createFileStore } = require('./files/file-store');
 
 async function main() {
   const config = loadConfig();
@@ -30,6 +31,7 @@ async function main() {
     clock,
     audit: createAuditService({ clock }),
     mailer: createMailer(config),
+    fileStore: createFileStore({ storageDir: config.storageDir, key: config.fileEncryptionKey }),
   });
 
   const server = app.listen(config.port, config.host, () => {

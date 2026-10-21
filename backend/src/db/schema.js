@@ -17,7 +17,7 @@ const COLUMNS = {
   bookings: [
     'divisionId', 'coordinatorUserId', 'hotelId', 'hotelName', 'eventName', 'location',
     'checkInDate', 'checkOutDate', 'deadlineAt', 'isShortNotice', 'status', 'statusChangedAt',
-    'previousStatus', 'shareTokenHash', 'finalisedAt', 'finalisedByUserId', 'cancelledAt',
+    'previousStatus', 'shareTokenHash', 'shareTokenVersion', 'finalisedAt', 'finalisedByUserId', 'cancelledAt',
     'cancelledByUserId', 'cancellationNote', 'filesDeletedAt', 'createdByUserId',
     'updatedByUserId', 'createdAt', 'updatedAt',
   ],
@@ -27,6 +27,21 @@ const COLUMNS = {
     'submissionStatus', 'submittedAt', 'deadlineOverrideAt', 'verifiedAt', 'verifiedByType',
     'verifiedByUserId', 'cancelledAt', 'cancelledByUserId', 'cancellationNote',
     'cancellationCommunicatedAt', 'createdAt', 'updatedAt',
+  ],
+  employee_otp_codes: [
+    'bookingEmployeeId', 'codeHash', 'attempts', 'requestIp', 'createdAt', 'expiresAt',
+    'consumedAt', 'invalidatedAt',
+  ],
+  employee_sessions: [
+    'tokenHash', 'bookingEmployeeId', 'ip', 'userAgent', 'createdAt', 'lastSeenAt', 'expiresAt', 'revokedAt',
+  ],
+  submissions: [
+    'bookingEmployeeId', 'idType', 'cardType', 'consentAt', 'consentVersion', 'submittedAt',
+    'supersededAt', 'filesDeletedAt', 'filesDeletedReason', 'filesDeletedByUserId', 'createdAt',
+  ],
+  submission_files: [
+    'submissionId', 'bookingId', 'side', 'storageKey', 'mimeType', 'sizeBytes', 'pageCount',
+    'createdAt', 'deletedAt',
   ],
   sessions: [
     'tokenHash', 'userId', 'authMethod', 'ip', 'userAgent', 'createdAt', 'lastSeenAt',

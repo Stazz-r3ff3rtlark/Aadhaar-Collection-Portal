@@ -4,12 +4,17 @@ const express = require('express');
 const { defineRoute } = require('../http/route');
 const { HttpError, badRequest, notFound } = require('../lib/errors');
 const { toIstSql, toIstIso, parseCalendarDate, istToday } = require('../lib/time');
-const { ROLES, canViewBooking, canEditBooking, canCreateBookingIn } = require('../auth/policy');
+const { ROLES, can, canViewBooking, canEditBooking, canCreateBookingIn, canViewAadhaar } = require('../auth/policy');
 const { resolveHotel } = require('../hotels/routes');
 const { computeDeadline } = require('./deadline');
 const { STATUSES, STATUS_LABELS, availableActions, planTransition } = require('./status');
 const { validateRows, MAX_ROWS } = require('./employee-rows');
 const { buildTemplate, parseEmployeeFile, FileProblem, MAX_FILE_BYTES } = require('./employee-file');
+const { uploadWindow, bookingWindow } = require('./upload-lock');
+const { END_OF_DAY } = require('./deadline');
+const { bookingLinkToken, tokenHash, bookingLinkUrl, invitationMessages } = require('../employees/booking-link');
+const { submissionState } = require('../employees/submission');
+const { purgeEmployees } = require('../files/deletion');
 
 // Bookings and their employee lists (backlog 6-11, 46, 47).
 //
@@ -69,9 +74,21 @@ function publicEmployee(e) {
     hq: e.hq,
     isVacant: e.isVacant,
     inviteStatus: e.inviteStatus,
+    openedAt: toIstIso(e.openedAt),
     submissionStatus: e.submissionStatus,
+    submittedAt: toIstIso(e.submittedAt),
+    deadlineOverrideAt: toIstIso(e.deadlineOverrideAt),
     cancelled: Boolean(e.cancelledAt),
   };
+}
+
+/** Coordinators of the booking's division and hospitality copy the link; admins only read bookings. */
+function canShareLink(user, booking) {
+  return can(user, 'bookings.edit') && canViewBooking(user, booking);
+}
+
+function publicWindow(window) {
+  return { open: window.open, reason: window.reason, message: window.message, deadlineAt: toIstIso(window.deadlineAt) };
 }
 
 function readOnlyMessage(user, booking) {
@@ -159,6 +176,15 @@ function employeeInput(body) {
   return values;
 }
 
+async function loadEmployee(ctx, booking) {
+  const id = parseId(ctx.params.employeeId);
+  ctx.audit.entityType = 'booking_employee';
+  ctx.audit.entityId = ctx.params.employeeId;
+  const employee = id ? await ctx.tx.employees.findById(booking.id, id) : null;
+  if (!employee) throw notFound('employee_not_found', 'This person is not on the booking.');
+  return employee;
+}
+
 function bookingRoutes() {
   const router = express.Router();
 
@@ -227,12 +253,130 @@ function bookingRoutes() {
     const booking = await loadBooking(ctx);
     const employees = await ctx.tx.employees.listByBooking(booking.id);
     ctx.audit.details.employeeCount = employees.length;
+    const now = ctx.deps.clock.now();
     return {
       body: {
         booking: publicBooking(booking),
-        employees: employees.map(publicEmployee),
+        employees: employees.map((e) => ({
+          ...publicEmployee(e),
+          uploadOpen: !e.isVacant && uploadWindow(booking, e, now).open,
+        })),
         actions: availableActions(ctx.user, booking),
         canEdit: canEditBooking(ctx.user, booking),
+        canShareLink: canShareLink(ctx.user, booking),
+        canViewAadhaar: canViewAadhaar(ctx.user, booking),
+        canExtendDeadline: can(ctx.user, 'deadlines.extend'),
+        uploadWindow: publicWindow(bookingWindow(booking, employees.filter((e) => !e.isVacant && !e.cancelledAt), now)),
+      },
+    };
+  });
+
+  // --- Booking link and invitation messages (C1, C2) ----------------------------
+
+  // The one shared link, plus ready-to-copy WhatsApp and email texts carrying it.
+  defineRoute(router, 'get', '/:id/link', { permission: 'bookings.read', audit: 'bookings.link.read' }, async (ctx) => {
+    let booking = await loadBooking(ctx, { lock: true });
+    if (!canShareLink(ctx.user, booking)) {
+      throw new HttpError(403, 'forbidden', 'Only the booking\'s coordinators and hospitality can share the booking link.');
+    }
+    const token = bookingLinkToken(ctx.deps.config, booking);
+    const hash = tokenHash(token);
+    if (booking.shareTokenHash !== hash) {
+      await ctx.tx.bookings.update(booking.id, { shareTokenHash: hash });
+      booking = await ctx.tx.bookings.findById(booking.id);
+      ctx.audit.details.created = true;
+    }
+    const url = bookingLinkUrl(ctx.deps.config, token);
+    const travellers = await ctx.tx.employees.listActive(booking.id);
+    return {
+      body: {
+        url,
+        messages: invitationMessages(booking, url),
+        window: publicWindow(bookingWindow(booking, travellers, ctx.deps.clock.now())),
+      },
+    };
+  });
+
+  // --- Deadlines (H3): hospitality only, reason required -------------------------
+
+  function cleanDeadline(ctx) {
+    const date = parseCalendarDate(ctx.body.date);
+    if (!date) throw badRequest('invalid_date', 'Enter the new deadline as DD/MM/YYYY.');
+    const deadlineAt = `${date} ${END_OF_DAY}`;
+    if (deadlineAt <= toIstSql(ctx.deps.clock.now())) throw badRequest('invalid_date', 'The new deadline must be in the future.');
+    const reason = typeof ctx.body.reason === 'string' ? ctx.body.reason.trim() : '';
+    if (!reason) throw badRequest('reason_required', 'Add a short reason for the change.');
+    if (reason.length > 500) throw badRequest('reason_too_long', 'The reason can be at most 500 characters.');
+    return { deadlineAt, reason };
+  }
+
+  function requireDeadlineChangeable(booking) {
+    if (['cancelled', 'completed', 'files_deleted'].includes(booking.status)) {
+      throw new HttpError(409, 'invalid_transition', `A booking that is ${STATUS_LABELS[booking.status]} has no deadline to change.`);
+    }
+  }
+
+  // Sets or extends the booking's deadline (including the first one of a short-notice booking).
+  defineRoute(router, 'post', '/:id/deadline', { permission: 'deadlines.extend', audit: 'bookings.deadline.extend' }, async (ctx) => {
+    const booking = await loadBooking(ctx, { lock: true });
+    requireDeadlineChangeable(booking);
+    const { deadlineAt, reason } = cleanDeadline(ctx);
+    await ctx.tx.bookings.update(booking.id, { deadlineAt });
+    await touch(ctx, booking.id);
+    ctx.audit.details = { changes: { deadlineAt: { old: booking.deadlineAt, new: deadlineAt } }, reason };
+    return { body: { booking: publicBooking(await ctx.tx.bookings.findById(booking.id)) } };
+  });
+
+  // A personal extension for one traveller.
+  defineRoute(router, 'post', '/:id/employees/:employeeId/deadline', { permission: 'deadlines.extend', audit: 'bookings.employees.deadline.extend' }, async (ctx) => {
+    const booking = await loadBooking(ctx, { lock: true });
+    requireDeadlineChangeable(booking);
+    const employee = await loadEmployee(ctx, booking);
+    if (employee.isVacant) throw badRequest('vacant_row', 'Vacant positions have no deadline.');
+    const { deadlineAt, reason } = cleanDeadline(ctx);
+    await ctx.tx.employees.update(employee.id, { deadlineOverrideAt: deadlineAt, updatedAt: toIstSql(ctx.deps.clock.now()) });
+    await touch(ctx, booking.id);
+    ctx.audit.details = { changes: { deadlineOverrideAt: { old: employee.deadlineOverrideAt, new: deadlineAt } }, reason };
+    return { body: { employee: publicEmployee(await ctx.tx.employees.findById(booking.id, employee.id)) } };
+  });
+
+  // --- Aadhaar files (staff) --------------------------------------------------------
+
+  // Lists one traveller's files with short-lived signed links (coordinators of the
+  // division before finalise, hospitality at any time; never admins).
+  defineRoute(router, 'get', '/:id/employees/:employeeId/files', { permission: 'aadhaar.view', audit: 'aadhaar.files.list' }, async (ctx) => {
+    const booking = await loadBooking(ctx);
+    if (!canViewAadhaar(ctx.user, booking)) {
+      throw new HttpError(403, 'forbidden', 'Aadhaar copies of this booking are not available to you.');
+    }
+    const employee = await loadEmployee(ctx, booking);
+    const state = await submissionState(ctx, employee, { base: '/api/files', id: `user:${ctx.user.id}` });
+    ctx.audit.details = { status: employee.submissionStatus, files: state.current?.files.length ?? 0 };
+    return { body: { status: employee.submissionStatus, current: state.current } };
+  });
+
+  // --- Booking history (A3) ------------------------------------------------------
+
+  defineRoute(router, 'get', '/:id/history', { permission: 'bookings.history.read', audit: 'bookings.history.read' }, async (ctx) => {
+    const booking = await loadBooking(ctx);
+    const limit = Math.min(parseId(ctx.query.limit) ?? 200, 500);
+    const entries = await ctx.tx.audit.list({ bookingId: booking.id, limit });
+    ctx.audit.details.count = entries.length;
+    return {
+      body: {
+        entries: entries.map((e) => ({
+          id: e.id,
+          occurredAt: toIstIso(e.occurredAt),
+          actorType: e.actorType,
+          actor: e.actorType === 'user' ? e.actorEmail : (e.actorLabel ?? null),
+          actorRole: e.actorRole,
+          action: e.action,
+          outcome: e.outcome,
+          entityType: e.entityType,
+          entityId: e.entityId,
+          ip: e.ip,
+          details: e.details,
+        })),
       },
     };
   });
@@ -323,7 +467,17 @@ function bookingRoutes() {
     ctx.audit.details = { mode, summary: result.summary };
     if (result.summary.withErrors) return rowError(result);
 
-    const removed = mode === 'replace' ? await ctx.tx.employees.deleteByBooking(booking.id) : 0;
+    let removed = 0;
+    if (mode === 'replace') {
+      const uploaded = await ctx.tx.employees.countWithUploads(booking.id);
+      if (uploaded) {
+        ctx.audit.details.reason = 'uploads_on_file';
+        throw new HttpError(409, 'uploads_on_file',
+          `${uploaded} ${uploaded === 1 ? 'person has' : 'people have'} already uploaded their Aadhaar, so the list cannot be replaced. Add to the list instead, or remove people one at a time.`);
+      }
+      await purgeEmployees(ctx, booking.id, existing.map((e) => e.id));
+      removed = await ctx.tx.employees.deleteByBooking(booking.id);
+    }
     const now = toIstSql(ctx.deps.clock.now());
     for (const row of result.rows) {
       const { rowNumber, errors, ...fields } = row;
@@ -351,15 +505,6 @@ function bookingRoutes() {
     return { status: 201, body: { employee: publicEmployee(await ctx.tx.employees.findById(booking.id, id)) } };
   });
 
-  async function loadEmployee(ctx, booking) {
-    const id = parseId(ctx.params.employeeId);
-    ctx.audit.entityType = 'booking_employee';
-    ctx.audit.entityId = ctx.params.employeeId;
-    const employee = id ? await ctx.tx.employees.findById(booking.id, id) : null;
-    if (!employee) throw notFound('employee_not_found', 'This person is not on the booking.');
-    return employee;
-  }
-
   // Replace: edit the row, or swap in a different person for the same place.
   defineRoute(router, 'put', '/:id/employees/:employeeId', { permission: 'bookings.edit', audit: 'bookings.employees.replace' }, async (ctx) => {
     const booking = await loadBooking(ctx, { edit: true, lock: true });
@@ -383,9 +528,11 @@ function bookingRoutes() {
     if (changes.employeeCode || changes.email) {
       Object.assign(update, {
         inviteStatus: 'not_sent', inviteSentAt: null, inviteSentVia: null, openedAt: null,
-        personalTokenHash: null, submissionStatus: 'pending', submittedAt: null,
+        personalTokenHash: null, submissionStatus: 'pending', submittedAt: null, deadlineOverrideAt: null,
       });
       ctx.audit.details.newPerson = true;
+      // The Aadhaar, codes and session of the person who left go with them.
+      ctx.audit.details.filesDeleted = await purgeEmployees(ctx, booking.id, [employee.id]);
     }
     await ctx.tx.employees.update(employee.id, update);
     await touch(ctx, booking.id);
@@ -396,6 +543,7 @@ function bookingRoutes() {
     const booking = await loadBooking(ctx, { edit: true, lock: true });
     const employee = await loadEmployee(ctx, booking);
     ctx.audit.details.old = Object.fromEntries(EMPLOYEE_FIELDS.map((k) => [k, employee[k]]));
+    ctx.audit.details.filesDeleted = await purgeEmployees(ctx, booking.id, [employee.id]);
     await ctx.tx.employees.delete(employee.id);
     await touch(ctx, booking.id);
     return { status: 204 };

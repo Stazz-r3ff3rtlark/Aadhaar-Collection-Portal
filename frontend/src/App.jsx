@@ -8,6 +8,7 @@ import Hotels from './pages/Hotels.jsx';
 import Bookings from './pages/Bookings.jsx';
 import BookingForm from './pages/BookingForm.jsx';
 import BookingDetail from './pages/BookingDetail.jsx';
+import EmployeePage from './pages/EmployeePage.jsx';
 import { ROLE_LABELS } from './roles.js';
 
 function useHashRoute() {
@@ -69,8 +70,15 @@ function Page({ route, user }) {
 }
 
 export default function App() {
-  const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
   const route = useHashRoute();
+  // The shared booking link: employees never sign in as staff.
+  const booking = route.match(/^\/b\/([A-Za-z0-9_-]{20,100})$/);
+  if (booking) return <ErrorBoundary><EmployeePage token={booking[1]} /></ErrorBoundary>;
+  return <StaffApp route={route} />;
+}
+
+function StaffApp({ route }) {
+  const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
 
   const loadUser = useCallback(async () => {
     try {

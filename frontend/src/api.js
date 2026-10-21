@@ -12,9 +12,10 @@ export class ApiError extends Error {
 
 /**
  * @param path    API path after /api
- * @param options { method, body } for JSON, or { method, file, contentType } to upload raw bytes
+ * @param options { method, body } for JSON, or { method, file, contentType } to upload raw bytes;
+ *                headers adds request headers (the employee page sends its link token this way)
  */
-export async function api(path, { method = 'GET', body, file, contentType } = {}) {
+export async function api(path, { method = 'GET', body, file, contentType, headers: extraHeaders } = {}) {
   let headers = {};
   let payload;
   if (file) {
@@ -26,7 +27,7 @@ export async function api(path, { method = 'GET', body, file, contentType } = {}
   }
   let res;
   try {
-    res = await fetch(`/api${path}`, { method, credentials: 'same-origin', headers, body: payload });
+    res = await fetch(`/api${path}`, { method, credentials: 'same-origin', headers: { ...headers, ...extraHeaders }, body: payload });
   } catch {
     throw new ApiError(0, { message: 'Could not reach the server. Check your connection and try again.' });
   }
@@ -34,7 +35,8 @@ export async function api(path, { method = 'GET', body, file, contentType } = {}
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     // A session ended mid-use (signed out, account changed): return to the sign-in screen.
-    if (res.status === 401 && !path.startsWith('/auth/')) window.dispatchEvent(new Event('session-expired'));
+    // Employee pages (/e/) handle their own sessions.
+    if (res.status === 401 && !path.startsWith('/auth/') && !path.startsWith('/e/')) window.dispatchEvent(new Event('session-expired'));
     throw new ApiError(res.status, data);
   }
   return data;

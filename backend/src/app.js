@@ -10,6 +10,9 @@ const { adminRoutes, divisionRoutes } = require('./admin/routes');
 const { hotelRoutes } = require('./hotels/routes');
 const { bookingRoutes } = require('./bookings/routes');
 const { auditRoutes } = require('./audit/routes');
+const { employeeRoutes } = require('./employees/routes');
+const { employeeSessionMiddleware } = require('./employees/employee-session');
+const { fileRoutes } = require('./files/routes');
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -26,6 +29,7 @@ function requestLog(req, res, next) {
       status: res.statusCode,
       ms: Number((process.hrtime.bigint() - started) / 1_000_000n),
       userId: req.auth?.user?.id,
+      employeeId: req.employeeAuth?.employee?.id,
     });
   });
   next();
@@ -61,7 +65,7 @@ function originGuard(deps) {
 }
 
 /**
- * @param deps { config, store, audit, mailer, clock }
+ * @param deps { config, store, audit, mailer, clock, fileStore }
  */
 function createApp(deps) {
   const app = express();
@@ -77,6 +81,7 @@ function createApp(deps) {
   api.use(express.json({ limit: '1mb' }));
   api.use(originGuard(deps));
   api.use(sessionMiddleware(deps));
+  api.use(employeeSessionMiddleware(deps));
 
   // Liveness for pm2 or uptime monitoring. It touches no records and returns no data,
   // so it is the one endpoint that does not write to the audit log.
@@ -96,6 +101,9 @@ function createApp(deps) {
   api.use('/hotels', hotelRoutes());
   api.use('/bookings', bookingRoutes());
   api.use('/audit', auditRoutes());
+  api.use('/files', fileRoutes());
+  // The employee page behind the shared booking link.
+  api.use('/e', employeeRoutes(deps.config));
 
   api.use((_req, res) => res.status(404).json({ error: 'not_found', message: 'Not found.' }));
 

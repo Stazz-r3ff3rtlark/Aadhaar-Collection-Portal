@@ -20,6 +20,10 @@ const { createAuditService } = require('../src/audit/audit-service');
 const { createMailer } = require('../src/mail/mailer');
 const { toIstSql } = require('../src/lib/time');
 const { toCamel, JSON_COLUMNS, BOOLEAN_COLUMNS } = require('../src/db/schema');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { createFileStore } = require('../src/files/file-store');
 
 loadEnvFile();
 
@@ -43,7 +47,7 @@ if (!TEST_DB.database.endsWith('_test') || TEST_DB.database === process.env.DB_N
 const DIVISIONS = { MEGACARE: 1, MAXIS: 2, DIGILABS: 3 };
 
 const TABLES = [
-  'audit_log', 'otp_codes', 'sessions', 'submission_files', 'submissions', 'booking_employees',
+  'audit_log', 'otp_codes', 'sessions', 'employee_otp_codes', 'employee_sessions', 'submission_files', 'submissions', 'booking_employees',
   'rooming_list_versions', 'emergency_contacts', 'hotel_links', 'bookings', 'hotels', 'users', 'divisions',
 ];
 
@@ -86,13 +90,18 @@ async function buildTestApp() {
     OTP_SECRET: 'test-otp-secret-at-least-thirty-two-characters',
     MAIL_TRANSPORT: 'memory',
     BCRYPT_COST: '4',
+    LINK_SECRET: 'test-link-secret-at-least-thirty-two-characters',
+    FILE_ENCRYPTION_KEY: Buffer.alloc(32, 3).toString('base64'),
+    // Each test app gets its own throwaway storage folder.
+    STORAGE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'acp-test-storage-')),
   });
   const pool = createPool({ ...TEST_DB, connectionLimit: 4 });
   await resetDatabase(pool);
   const store = createMariaDbStore(pool);
   const mailer = createMailer(config);
   const audit = createAuditService({ clock });
-  const app = createApp({ config, store, mailer, clock, audit });
+  const fileStore = createFileStore({ storageDir: config.storageDir, key: config.fileEncryptionKey });
+  const app = createApp({ config, store, mailer, clock, audit, fileStore });
 
   const t = {
     app,
@@ -102,8 +111,12 @@ async function buildTestApp() {
     clock,
     config,
     audit,
+    fileStore,
 
-    close: () => pool.end(),
+    async close() {
+      await pool.end();
+      fs.rmSync(config.storageDir, { recursive: true, force: true });
+    },
 
     /** Raw SQL for setting up states the API cannot reach yet (e.g. a finalised booking). */
     query: (sql, params) => pool.query(sql, params),

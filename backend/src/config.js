@@ -43,6 +43,14 @@ function loadConfig(env = process.env) {
       password: env.DB_MIGRATION_PASSWORD ?? env.DB_PASSWORD ?? '',
     },
     otpSecret: env.OTP_SECRET || (isProduction ? '' : 'dev-only-otp-secret-change-me-0000000000'),
+    // Derives the shared booking links and signs short-lived file URLs. Changing it
+    // replaces every booking link.
+    linkSecret: env.LINK_SECRET || (isProduction ? '' : 'dev-only-link-secret-change-me-000000000'),
+    // AES-256-GCM key for Aadhaar files at rest: 32 bytes, base64. Losing it makes the
+    // stored files unreadable; changing it needs the files re-encrypted.
+    fileEncryptionKey: env.FILE_ENCRYPTION_KEY
+      ? Buffer.from(env.FILE_ENCRYPTION_KEY, 'base64')
+      : (isProduction ? Buffer.alloc(0) : Buffer.alloc(32, 7)),
     session: {
       cookieSecure: isProduction || env.COOKIE_SECURE === 'true',
       idleMinutes: int(env.SESSION_IDLE_MINUTES, 120),
@@ -53,6 +61,22 @@ function loadConfig(env = process.env) {
       maxAttempts: 5,
       cooldownSeconds: 60,
       maxPerHour: 5,
+    },
+    // Employees: a short session after the emailed code, on one booking only.
+    employee: {
+      sessionMinutes: int(env.EMPLOYEE_SESSION_MINUTES, 30),
+      // Codes requested from one IP address per hour, across all employees, on top of the
+      // per-employee limits. High enough for a whole office behind one network address.
+      maxCodesPerIpPerHour: int(env.EMPLOYEE_MAX_CODES_PER_IP_HOUR, 100),
+    },
+    upload: {
+      // PRD: up to 10 MB before compression; PDFs up to 3 pages, not password-protected.
+      maxBytes: 10 * 1024 * 1024,
+      maxPdfPages: 3,
+      maxImagePixels: 60_000_000,
+      jpegQuality: 85,
+      maxEdgePx: 2400,
+      signedUrlSeconds: 300,
     },
     password: {
       minLength: 10,
@@ -83,6 +107,8 @@ function loadConfig(env = process.env) {
 function validateConfig(config) {
   const problems = [];
   if (config.otpSecret.length < 32) problems.push('OTP_SECRET must be at least 32 characters');
+  if (config.linkSecret.length < 32) problems.push('LINK_SECRET must be at least 32 characters');
+  if (config.fileEncryptionKey.length !== 32) problems.push('FILE_ENCRYPTION_KEY must be 32 bytes, base64-encoded');
   if (config.isProduction) {
     if (!config.db.password) problems.push('DB_PASSWORD is required in production');
     if (config.mail.transport !== 'smtp') problems.push('MAIL_TRANSPORT must be smtp in production');

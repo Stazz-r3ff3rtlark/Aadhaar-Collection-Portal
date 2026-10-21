@@ -52,6 +52,7 @@ const BOOKING_SELECT = `
          d.name AS division_name,
          COALESCE(h.name, b.hotel_name) AS hotel_display_name,
          h.review_status AS hotel_review_status,
+         h.city AS hotel_city,
          cu.name AS created_by_name,
          uu.name AS updated_by_name,
          COALESCE(c.total, 0) AS employee_total,
@@ -181,6 +182,7 @@ function repos(conn) {
         );
       },
       findById: (id) => one(`${BOOKING_SELECT} WHERE b.id = ?`, [id]),
+      findByShareTokenHash: (hash) => one(`${BOOKING_SELECT} WHERE b.share_token_hash = ?`, [hash]),
       /** Locks the booking row for the rest of the transaction (status changes, imports). */
       lock: (id) => one('SELECT id FROM bookings WHERE id = ? FOR UPDATE', [id]),
       insert: (fields) => insert('bookings', fields),
@@ -203,10 +205,152 @@ function repos(conn) {
         [bookingId],
       ),
       findById: (bookingId, id) => one('SELECT * FROM booking_employees WHERE booking_id = ? AND id = ?', [bookingId, id]),
+      /** By id alone: only for an employee session, which already names its employee. */
+      findByIdOnly: (id) => one('SELECT * FROM booking_employees WHERE id = ?', [id]),
+      /** Locks one employee row for the rest of the transaction (uploads). */
+      lock: (id) => one('SELECT id FROM booking_employees WHERE id = ? FOR UPDATE', [id]),
       insert: (fields) => insert('booking_employees', fields),
       update: (id, fields) => update('booking_employees', id, fields),
       delete: (id) => exec('DELETE FROM booking_employees WHERE id = ?', [id]),
       deleteByBooking: (bookingId) => exec('DELETE FROM booking_employees WHERE booking_id = ?', [bookingId]),
+      /**
+       * Removes the rows that hang off employees (submissions and their file records,
+       * codes, sessions) so the employees themselves can be deleted. Files on disk must
+       * be removed by the caller (src/files/deletion.js).
+       */
+      async purgeRelated(employeeIds) {
+        if (!employeeIds.length) return;
+        const marks = employeeIds.map(() => '?').join(', ');
+        await exec(
+          `DELETE f FROM submission_files f JOIN submissions s ON s.id = f.submission_id
+            WHERE s.booking_employee_id IN (${marks})`,
+          employeeIds,
+        );
+        await exec(`DELETE FROM submissions WHERE booking_employee_id IN (${marks})`, employeeIds);
+        await exec(`DELETE FROM employee_otp_codes WHERE booking_employee_id IN (${marks})`, employeeIds);
+        await exec(`DELETE FROM employee_sessions WHERE booking_employee_id IN (${marks})`, employeeIds);
+      },
+      /** Employees with an upload on file (complete, or started with at least one file). */
+      async countWithUploads(bookingId) {
+        const rows = await conn.query(
+          `SELECT COUNT(DISTINCT e.id) AS n FROM booking_employees e
+             JOIN submissions s ON s.booking_employee_id = e.id
+             JOIN submission_files f ON f.submission_id = s.id AND f.deleted_at IS NULL
+            WHERE e.booking_id = ?`,
+          [bookingId],
+        );
+        return Number(rows[0].n);
+      },
+    },
+
+    employeeOtps: {
+      insert: (fields) => insert('employee_otp_codes', fields),
+      update: (id, fields) => update('employee_otp_codes', id, fields),
+      findLatestActive: (employeeId, now) => one(
+        `SELECT * FROM employee_otp_codes
+          WHERE booking_employee_id = ? AND consumed_at IS NULL AND invalidated_at IS NULL AND expires_at > ?
+          ORDER BY id DESC LIMIT 1`,
+        [employeeId, now],
+      ),
+      findLatest: (employeeId) => one(
+        'SELECT * FROM employee_otp_codes WHERE booking_employee_id = ? ORDER BY id DESC LIMIT 1',
+        [employeeId],
+      ),
+      async countSince(employeeId, since) {
+        const rows = await conn.query(
+          'SELECT COUNT(*) AS n FROM employee_otp_codes WHERE booking_employee_id = ? AND created_at >= ?',
+          [employeeId, since],
+        );
+        return Number(rows[0].n);
+      },
+      async countFromIpSince(ip, since) {
+        const rows = await conn.query(
+          'SELECT COUNT(*) AS n FROM employee_otp_codes WHERE request_ip = ? AND created_at >= ?',
+          [ip, since],
+        );
+        return Number(rows[0].n);
+      },
+      invalidateActive: (employeeId, at) => exec(
+        `UPDATE employee_otp_codes SET invalidated_at = ?
+          WHERE booking_employee_id = ? AND consumed_at IS NULL AND invalidated_at IS NULL`,
+        [at, employeeId],
+      ),
+    },
+
+    employeeSessions: {
+      insert: (fields) => insert('employee_sessions', fields),
+      findByTokenHash: (hash) => one('SELECT * FROM employee_sessions WHERE token_hash = ?', [hash]),
+      update: (id, fields) => update('employee_sessions', id, fields),
+      revokeAllForEmployee: (employeeId, at) => exec(
+        'UPDATE employee_sessions SET revoked_at = ? WHERE booking_employee_id = ? AND revoked_at IS NULL',
+        [at, employeeId],
+      ),
+    },
+
+    submissions: {
+      insert: (fields) => insert('submissions', fields),
+      update: (id, fields) => update('submissions', id, fields),
+      findById: (id) => one('SELECT * FROM submissions WHERE id = ?', [id]),
+      /** The submission being filled in: not yet complete, not replaced, files not deleted. */
+      findDraft: (employeeId) => one(
+        `SELECT * FROM submissions
+          WHERE booking_employee_id = ? AND submitted_at IS NULL AND superseded_at IS NULL AND files_deleted_at IS NULL
+          ORDER BY id DESC LIMIT 1`,
+        [employeeId],
+      ),
+      /** The complete submission currently on file. */
+      markFilesDeleted: (ids, at, reason, byUserId) => (ids.length ? exec(
+        `UPDATE submissions SET files_deleted_at = ?, files_deleted_reason = ?, files_deleted_by_user_id = ?
+          WHERE id IN (${ids.map(() => '?').join(', ')}) AND files_deleted_at IS NULL`,
+        [at, reason, byUserId, ...ids],
+      ) : Promise.resolve(0)),
+      markFilesDeletedForBooking: (bookingId, at, reason, byUserId) => exec(
+        `UPDATE submissions s JOIN booking_employees e ON e.id = s.booking_employee_id
+            SET s.files_deleted_at = ?, s.files_deleted_reason = ?, s.files_deleted_by_user_id = ?
+          WHERE e.booking_id = ? AND s.files_deleted_at IS NULL`,
+        [at, reason, byUserId, bookingId],
+      ),
+      findCurrent: (employeeId) => one(
+        `SELECT * FROM submissions
+          WHERE booking_employee_id = ? AND submitted_at IS NOT NULL AND superseded_at IS NULL AND files_deleted_at IS NULL
+          ORDER BY id DESC LIMIT 1`,
+        [employeeId],
+      ),
+    },
+
+    files: {
+      insert: (fields) => insert('submission_files', fields),
+      update: (id, fields) => update('submission_files', id, fields),
+      findById: (id) => one(
+        `SELECT f.*, s.booking_employee_id, s.submitted_at, s.superseded_at
+           FROM submission_files f JOIN submissions s ON s.id = f.submission_id
+          WHERE f.id = ?`,
+        [id],
+      ),
+      listBySubmission: (submissionId) => many(
+        'SELECT * FROM submission_files WHERE submission_id = ? AND deleted_at IS NULL ORDER BY id',
+        [submissionId],
+      ),
+      /** Files not yet deleted for these employees, oldest first. */
+      listByEmployees: (employeeIds) => (employeeIds.length ? many(
+        `SELECT f.*, s.booking_employee_id FROM submission_files f JOIN submissions s ON s.id = f.submission_id
+          WHERE s.booking_employee_id IN (${employeeIds.map(() => '?').join(', ')}) AND f.deleted_at IS NULL
+          ORDER BY f.id`,
+        employeeIds,
+      ) : Promise.resolve([])),
+      markDeleted: (ids, at) => (ids.length ? exec(
+        `UPDATE submission_files SET deleted_at = ? WHERE id IN (${ids.map(() => '?').join(', ')}) AND deleted_at IS NULL`,
+        [at, ...ids],
+      ) : Promise.resolve(0)),
+      markDeletedForBooking: (bookingId, at) => exec(
+        'UPDATE submission_files SET deleted_at = ? WHERE booking_id = ? AND deleted_at IS NULL',
+        [at, bookingId],
+      ),
+      /** Every file of a booking not yet deleted: the list the deletion job works from. */
+      listByBooking: (bookingId) => many(
+        'SELECT * FROM submission_files WHERE booking_id = ? AND deleted_at IS NULL ORDER BY id',
+        [bookingId],
+      ),
     },
 
     sessions: {

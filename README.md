@@ -3,7 +3,7 @@
 Collects Aadhaar copies for hotel bookings: sales coordinators → hospitality → vendor hotels.
 Requirements: [docs/PRD.md](docs/PRD.md). Working rules: [CLAUDE.md](CLAUDE.md).
 
-## Status: M1 (divisions, users, bookings)
+## Status: M2 (employee page and Aadhaar upload)
 
 **M0, foundation:**
 
@@ -36,9 +36,25 @@ Requirements: [docs/PRD.md](docs/PRD.md). Working rules: [CLAUDE.md](CLAUDE.md).
   coordinators flip them until finalise, hospitality at any time. Vacant rows are excluded from
   active and pending counts and from the active traveller list.
 
-Not built yet (later stages): the finalise checklist, rooming list, employee upload links, file
-storage and processing, the email queue and reminders, deadline extensions (including setting a
-short-notice deadline), hotel links, retention jobs and analytics.
+**M2:**
+
+- One shared booking link per booking (`#/b/<token>`), copied from the booking page with ready-to-copy,
+  editable WhatsApp and email texts. The token is derived from `LINK_SECRET`; only its hash is stored.
+- Employee page (mobile first): pick your name (names and employee codes only), confirm with a
+  6-digit code emailed to the listed address (same limits as staff codes, plus a per-network cap),
+  Aadhaar guide, card type and consent, upload, preview, replace, "Received" confirmation.
+- Files: JPG, PNG, HEIC (converted) and PDF, checked by content; up to 10 MB; images re-encoded to
+  JPEG (quality 85, long edge 2400 px, EXIF removed); PDFs up to 3 pages, not password-protected,
+  kept as they are. Stored AES-256-GCM encrypted (`FILE_ENCRYPTION_KEY`) under
+  `storage/aadhaar/<booking id>/<random>.bin`, served only through 5-minute signed links that also
+  need the viewer's session. `src/files/deletion.js` is the deletion hook for the retention job.
+- Upload lock: `src/bookings/upload-lock.js` is the one rule (Collecting only, until the employee's
+  own extension or the booking deadline, 23:59 IST). Hospitality sets or extends deadlines per
+  booking or per person, with a reason.
+- Booking history for hospitality and admins; every employee step is audited.
+
+Not built yet (later stages): the finalise checklist, rooming list, the email queue and reminders
+(including personal links), hotel links, manual file deletion, retention jobs and analytics.
 
 ## Layout
 
@@ -113,7 +129,7 @@ different server or user, set `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_USER`, `T
 and `TEST_DB_NAME`.
 
 ```sh
-cd backend && npm test     # sign-in, access, audit, admin, bookings, employee list
+cd backend && npm test     # sign-in, access, audit, admin, bookings, employee list, employee page
 cd frontend && npm test    # date formatting
 ```
 

@@ -13,15 +13,18 @@
     "build": "node --check src/server.js && echo 'Backend has no build step'",
     "migrate": "node src/db/migrate.js",
     "create-admin": "node src/cli/create-admin.js",
-    "test": "node --test --test-concurrency=1 test/"
+    "test": "node --test --test-concurrency=1 test/*.test.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "exceljs": "^4.4.0",
     "express": "^5.3.0",
+    "heic-decode": "^2.1.0",
     "helmet": "^8.3.0",
     "mariadb": "^3.5.4",
-    "nodemailer": "^10.1.1"
+    "nodemailer": "^10.1.1",
+    "pdf-lib": "^1.17.1",
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
     "supertest": "^7.3.1"
